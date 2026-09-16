@@ -178,7 +178,7 @@ if busqueda:
 
 # Configuración de estantes
 config_estantes = {"A": {1: 2, 2: 3, 3: 2}, "B": {1: 2, 2: 2, 3: 3}, "C": {1: 2, 2: 2, 3: 2}}
-posiciones_bloqueadas = ["B15D1", "B15D2", "B15P1", "B15P2", "B16D1", "B16D2", "B16P1", "B16P2"]
+posiciones_bloqueadas = []
 ubicaciones_ocupadas = set(df["Ultima Ubicación"].dropna().astype(str).tolist()) if "Ultima Ubicación" in df.columns else set()
 
 
