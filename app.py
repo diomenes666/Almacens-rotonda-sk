@@ -33,34 +33,11 @@ DOMINIO_ORG = "sankare.com"
 
 MAX_FOTOS_POR_POSICION = 5
 
-# Encabezados reales de la hoja, en el orden en que están en el Sheet.
-# La fila que se escribe se arma A PARTIR de esta lista, no por posición
-# hardcodeada, para que un cambio de orden en la hoja solo requiera
-# actualizar esta constante.
-ENCABEZADOS = [
-    "Ultima Ubicación",
-    "Concepto",
-    "Periodos",
-    "Detalle",
-    "Año",
-    "Observaciones",
-    "Foto",
-]
-
-# Columnas que determinan si una posición está realmente OCUPADA.
-# Si todas están vacías, la posición se considera libre aunque la fila
-# siga existiendo en la hoja.
-COLUMNAS_CONTENIDO = [
-    "Concepto",
-    "Periodos",
-    "Detalle",
-    "Año",
-    "Observaciones",
-    "Foto",
-]
-
 COLUMNA_UBICACION = "Ultima Ubicación"
 PRIMERA_FILA_DATOS = 2  # fila 1 = encabezados
+
+# Campos que el formulario exige completar antes de guardar.
+CAMPOS_REQUERIDOS = ["Área"]
 
 
 # ---------------------------------------------------------
@@ -93,6 +70,30 @@ def conectar_servicios():
 
 
 worksheet, drive_service = conectar_servicios()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def obtener_encabezados():
+    """Lee la fila de encabezados directamente de la hoja. Así, si en el
+    Excel se agrega, quita o reordena una columna (como 'Área'), la app
+    se adapta sola: no hay que tocar ninguna constante en el código."""
+    return [h.strip() for h in worksheet.row_values(1) if h.strip()]
+
+
+ENCABEZADOS = obtener_encabezados()
+
+# Columnas que determinan si una posición está realmente OCUPADA:
+# cualquier columna que no sea la ubicación misma. Si todas están vacías,
+# la posición se considera libre aunque la fila siga existiendo.
+COLUMNAS_CONTENIDO = [h for h in ENCABEZADOS if h != COLUMNA_UBICACION]
+
+_faltantes = [c for c in [COLUMNA_UBICACION] + CAMPOS_REQUERIDOS if c not in ENCABEZADOS]
+if _faltantes:
+    st.error(
+        f"La hoja no tiene la(s) columna(s): {', '.join(_faltantes)}. "
+        f"Verifica el encabezado (fila 1) del Excel antes de continuar."
+    )
+    st.stop()
 
 
 # ---------------------------------------------------------
@@ -222,21 +223,36 @@ def parsear_fotos(valor_celda):
     return [url.strip() for url in str(valor_celda).split(",") if url.strip()]
 
 
-def calcular_ocupadas(df):
-    """Una posición está ocupada solo si TIENE CONTENIDO.
-    Antes se consideraba ocupada por el simple hecho de existir la fila,
-    por eso una posición vaciada seguía en rojo."""
+def calcular_estado_posiciones(df):
+    """Devuelve {ubicación: concepto} solo para posiciones con contenido.
+    Una posición está ocupada si TIENE CONTENIDO, no por el simple hecho
+    de existir la fila (antes una posición vaciada seguía en rojo).
+    El concepto/título se usa además para mostrarlo en la grilla."""
     if df.empty or COLUMNA_UBICACION not in df.columns:
-        return set()
+        return {}
     cols = [c for c in COLUMNAS_CONTENIDO if c in df.columns]
     if not cols:
-        return set()
+        return {}
     tiene_datos = df[cols].astype(str).apply(
         lambda fila: any(v.strip() and v.strip().lower() != "nan" for v in fila),
         axis=1
     )
-    ubis = df.loc[tiene_datos, COLUMNA_UBICACION].astype(str).str.strip()
-    return set(ubis) - {"", "nan"}
+    ocupadas = df.loc[tiene_datos].copy()
+    ocupadas[COLUMNA_UBICACION] = ocupadas[COLUMNA_UBICACION].astype(str).str.strip()
+    ocupadas = ocupadas[~ocupadas[COLUMNA_UBICACION].isin(["", "nan"])]
+
+    estado = {}
+    for _, fila in ocupadas.iterrows():
+        concepto = str(fila.get("Concepto", "") or "").strip()
+        estado[fila[COLUMNA_UBICACION]] = concepto
+    return estado
+
+
+def truncar(texto, largo=16):
+    texto = (texto or "").strip()
+    if len(texto) <= largo:
+        return texto
+    return texto[: largo - 1].rstrip() + "…"
 
 
 def fila_de(ubicacion, df):
@@ -280,7 +296,7 @@ elif busqueda:
 # Configuración de estantes
 config_estantes = {"A": {1: 2, 2: 3, 3: 2}, "B": {1: 2, 2: 2, 3: 3}, "C": {1: 2, 2: 2, 3: 2}}
 posiciones_bloqueadas = []
-ubicaciones_ocupadas = calcular_ocupadas(df)
+estado_posiciones = calcular_estado_posiciones(df)  # {ubicación: concepto}
 
 
 # ---------------------------------------------------------
@@ -300,30 +316,54 @@ def abrir_modal_registro(ubicacion):
         return "" if pd.isna(v) else str(v)
 
     concepto_val = _val("Concepto")
+    area_val = _val("Área")
     periodos_val = _val("Periodos")
     anio_val = _val("Año")
     detalle_val = _val("Detalle")
     obs_val = _val("Observaciones")
     lista_fotos_existentes = parsear_fotos(_val("Foto"))
 
-    # --- Fotos ya registradas ---
+    # ---------------------------------------------------------------
+    # 1) INFORMACIÓN DE LA POSICIÓN — primero, para identificar el
+    #    contenido de un vistazo antes de llegar a las fotos.
+    # ---------------------------------------------------------------
+    concepto = st.text_input("Concepto / Título", value=concepto_val)
+
+    col_i1, col_i2 = st.columns(2)
+    with col_i1:
+        area = st.text_input("Área *", value=area_val, help="Campo obligatorio")
+    with col_i2:
+        anio = st.text_input("Año", value=anio_val)
+
+    periodos = st.text_input("Periodos", value=periodos_val)
+    detalle = st.text_area("Detalle del Contenido", value=detalle_val, height=80)
+    obs = st.text_input("Observaciones", value=obs_val)
+
+    st.caption("* Campo obligatorio")
+    st.divider()
+
+    # ---------------------------------------------------------------
+    # 2) FOTOS — al final, es lo último que se revisa antes de guardar.
+    # ---------------------------------------------------------------
+    st.markdown("**📸 Fotografías**")
+
     fotos_a_conservar = []
     if lista_fotos_existentes:
-        st.markdown("**📸 Fotos registradas**")
+        st.caption("Fotos registradas — desmarca las que quieras eliminar al guardar:")
         opciones = {f"Foto {i + 1}": url for i, url in enumerate(lista_fotos_existentes)}
         seleccion = st.multiselect(
-            "Desmarca las que quieras eliminar al guardar:",
+            "Fotos registradas",
             options=list(opciones.keys()),
             default=list(opciones.keys()),
-            key=f"fotos_existentes_{ubicacion}"
+            key=f"fotos_existentes_{ubicacion}",
+            label_visibility="collapsed",
         )
         for etiqueta in seleccion:
             fotos_a_conservar.append(opciones[etiqueta])
         for etiqueta, url in opciones.items():
             st.markdown(f"🔗 [{etiqueta}]({url})")
 
-    st.markdown("**📸 Agregar Evidencia Fotográfica (Opcional)**")
-    st.caption(f"Máximo {MAX_FOTOS_POR_POSICION} fotos en total por posición.")
+    st.caption(f"Agregar evidencia (opcional) — máximo {MAX_FOTOS_POR_POSICION} fotos en total por posición.")
 
     # --- Subida desde galería (múltiple) ---
     fotos_galeria = st.file_uploader(
@@ -367,26 +407,20 @@ def abrir_modal_registro(ubicacion):
             f"{MAX_FOTOS_POR_POSICION}. Quita algunas antes de guardar."
         )
 
-    with st.form(f"form_modal_{ubicacion}"):
-        concepto = st.text_input("Concepto / Título", value=concepto_val)
+    st.divider()
 
-        col_m1, col_m2 = st.columns(2)
-        with col_m1:
-            periodos = st.text_input("Periodos", value=periodos_val)
-        with col_m2:
-            anio = st.text_input("Año", value=anio_val)
+    guardar = st.button(
+        "💾 Guardar Registro",
+        type="primary",
+        use_container_width=True,
+        disabled=total_final > MAX_FOTOS_POR_POSICION,
+        key=f"guardar_{ubicacion}",
+    )
 
-        detalle = st.text_area("Detalle del Contenido", value=detalle_val, height=80)
-        obs = st.text_input("Observaciones", value=obs_val)
-
-        guardar = st.form_submit_button(
-            "💾 Guardar Registro",
-            type="primary",
-            use_container_width=True,
-            disabled=total_final > MAX_FOTOS_POR_POSICION
-        )
-
-        if guardar:
+    if guardar:
+        if not area.strip():
+            st.error("El campo **Área** es obligatorio.")
+        else:
             archivos_nuevos = list(fotos_galeria or []) + list(canasta)
             links_nuevos = []
             if archivos_nuevos:
@@ -399,6 +433,7 @@ def abrir_modal_registro(ubicacion):
             nueva_fila = construir_fila({
                 COLUMNA_UBICACION: ubicacion,
                 "Concepto": concepto,
+                "Área": area,
                 "Periodos": periodos,
                 "Detalle": detalle,
                 "Año": anio,
@@ -479,8 +514,17 @@ for sub_idx, sub_num in enumerate([1, 2, 3]):
                         if cod in posiciones_bloqueadas:
                             st.button(f"🚫 {cod}", key=f"btn_{cod}", disabled=True, use_container_width=True)
                         else:
-                            ocup = cod in ubicaciones_ocupadas
+                            concepto = estado_posiciones.get(cod)
+                            ocup = concepto is not None
                             lbl = f"🔴 {cod}" if ocup else f"🟢 {cod}"
 
-                            if st.button(lbl, key=f"btn_{cod}", use_container_width=True):
+                            if st.button(
+                                lbl,
+                                key=f"btn_{cod}",
+                                use_container_width=True,
+                                help=concepto if concepto else None,
+                            ):
                                 abrir_modal_registro(cod)
+
+                            if concepto:
+                                st.caption(truncar(concepto))
