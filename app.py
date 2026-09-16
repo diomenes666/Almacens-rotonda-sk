@@ -5,6 +5,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2.service_account import Credentials
 import io
+import re
 from datetime import datetime
 
 # Configuración de página adaptativa
@@ -32,12 +33,44 @@ DOMINIO_ORG = "sankare.com"
 
 MAX_FOTOS_POR_POSICION = 5
 
+# Encabezados reales de la hoja, en el orden en que están en el Sheet.
+# La fila que se escribe se arma A PARTIR de esta lista, no por posición
+# hardcodeada, para que un cambio de orden en la hoja solo requiera
+# actualizar esta constante.
+ENCABEZADOS = [
+    "Ultima Ubicación",
+    "Concepto",
+    "Periodos",
+    "Detalle",
+    "Año",
+    "Observaciones",
+    "Foto",
+]
+
+# Columnas que determinan si una posición está realmente OCUPADA.
+# Si todas están vacías, la posición se considera libre aunque la fila
+# siga existiendo en la hoja.
+COLUMNAS_CONTENIDO = [
+    "Concepto",
+    "Periodos",
+    "Detalle",
+    "Año",
+    "Observaciones",
+    "Foto",
+]
+
+COLUMNA_UBICACION = "Ultima Ubicación"
+PRIMERA_FILA_DATOS = 2  # fila 1 = encabezados
+
 
 # ---------------------------------------------------------
 # CONEXIÓN CON GOOGLE SHEETS Y GOOGLE DRIVE
 # ---------------------------------------------------------
-@st.cache_resource(ttl=0)
+@st.cache_resource
 def conectar_servicios():
+    """Cliente de Sheets y Drive. Se cachea como recurso: crearlo en cada
+    rerun (que ocurre en cada clic de la grilla) era la principal fuente
+    de lentitud y de errores 429."""
     try:
         creds_dict = dict(st.secrets["connections"]["gsheets"])
 
@@ -70,6 +103,18 @@ def _extension_archivo(archivo, default="jpg"):
     if nombre and "." in nombre:
         return nombre.rsplit(".", 1)[-1].lower()
     return default
+
+
+def _id_desde_link(url):
+    """Extrae el fileId de un webViewLink de Drive.
+    Soporta .../file/d/<id>/view y ...?id=<id>."""
+    if not url:
+        return None
+    m = re.search(r"/d/([A-Za-z0-9_-]{10,})", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"[?&]id=([A-Za-z0-9_-]{10,})", url)
+    return m.group(1) if m else None
 
 
 def _otorgar_permiso_visualizacion(file_id):
@@ -142,12 +187,31 @@ def subir_multiples_fotos(archivos, ubicacion):
     return links
 
 
+def eliminar_fotos_de_drive(urls):
+    """Envía a la papelera los archivos cuyos links ya no están asociados
+    a ninguna posición, para no dejar huérfanos en la Unidad Compartida."""
+    for url in urls:
+        file_id = _id_desde_link(url)
+        if not file_id:
+            continue
+        try:
+            drive_service.files().update(
+                fileId=file_id,
+                body={'trashed': True},
+                supportsAllDrives=True
+            ).execute()
+        except Exception as e:
+            st.warning(f"No se pudo eliminar una foto de Drive: {e}")
+
+
 # ---------------------------------------------------------
 # DATOS
 # ---------------------------------------------------------
+@st.cache_data(ttl=300, show_spinner=False)
 def cargar_datos():
-    data = worksheet.get_all_records()
-    return pd.DataFrame(data)
+    """Lectura cacheada de la hoja. Se invalida explícitamente con
+    cargar_datos.clear() después de cada escritura."""
+    return pd.DataFrame(worksheet.get_all_records())
 
 
 def parsear_fotos(valor_celda):
@@ -156,6 +220,41 @@ def parsear_fotos(valor_celda):
     if not valor_celda:
         return []
     return [url.strip() for url in str(valor_celda).split(",") if url.strip()]
+
+
+def calcular_ocupadas(df):
+    """Una posición está ocupada solo si TIENE CONTENIDO.
+    Antes se consideraba ocupada por el simple hecho de existir la fila,
+    por eso una posición vaciada seguía en rojo."""
+    if df.empty or COLUMNA_UBICACION not in df.columns:
+        return set()
+    cols = [c for c in COLUMNAS_CONTENIDO if c in df.columns]
+    if not cols:
+        return set()
+    tiene_datos = df[cols].astype(str).apply(
+        lambda fila: any(v.strip() and v.strip().lower() != "nan" for v in fila),
+        axis=1
+    )
+    ubis = df.loc[tiene_datos, COLUMNA_UBICACION].astype(str).str.strip()
+    return set(ubis) - {"", "nan"}
+
+
+def fila_de(ubicacion, df):
+    """Número de fila real en la hoja para una ubicación.
+    Reemplaza a worksheet.find(), que recorre TODAS las columnas y podía
+    devolver una fila equivocada si el código aparecía en Detalle u
+    Observaciones de otro registro."""
+    if df.empty or COLUMNA_UBICACION not in df.columns:
+        return None
+    coincidencias = df.index[
+        df[COLUMNA_UBICACION].astype(str).str.strip() == str(ubicacion).strip()
+    ]
+    return int(coincidencias[0]) + PRIMERA_FILA_DATOS if len(coincidencias) else None
+
+
+def construir_fila(valores):
+    """Arma la fila respetando el orden declarado en ENCABEZADOS."""
+    return [valores.get(h, "") for h in ENCABEZADOS]
 
 
 df = cargar_datos()
@@ -168,18 +267,20 @@ codigo_estante = estante_sel[0]
 # Buscador
 st.sidebar.subheader("🔍 Buscar")
 busqueda = st.sidebar.text_input("Ingresa término:")
-if busqueda:
-    res = df[df.apply(lambda row: row.astype(str).str.contains(busqueda, case=False).any(), axis=1)]
+if busqueda and not df.empty:
+    res = df[df.apply(lambda row: row.astype(str).str.contains(busqueda, case=False, na=False).any(), axis=1)]
     if not res.empty:
         for _, r in res.iterrows():
-            st.sidebar.info(f"📍 **{r.get('Ultima Ubicación', '')}**: {r.get('Concepto', '')}")
+            st.sidebar.info(f"📍 **{r.get(COLUMNA_UBICACION, '')}**: {r.get('Concepto', '')}")
     else:
         st.sidebar.warning("Sin resultados")
+elif busqueda:
+    st.sidebar.warning("Sin resultados")
 
 # Configuración de estantes
 config_estantes = {"A": {1: 2, 2: 3, 3: 2}, "B": {1: 2, 2: 2, 3: 3}, "C": {1: 2, 2: 2, 3: 2}}
 posiciones_bloqueadas = []
-ubicaciones_ocupadas = set(df["Ultima Ubicación"].dropna().astype(str).tolist()) if "Ultima Ubicación" in df.columns else set()
+ubicaciones_ocupadas = calcular_ocupadas(df)
 
 
 # ---------------------------------------------------------
@@ -189,15 +290,21 @@ ubicaciones_ocupadas = set(df["Ultima Ubicación"].dropna().astype(str).tolist()
 def abrir_modal_registro(ubicacion):
     st.markdown(f"### Posición: **{ubicacion}**")
 
-    pos_data = df[df["Ultima Ubicación"] == ubicacion] if "Ultima Ubicación" in df.columns else pd.DataFrame()
+    pos_data = df[df[COLUMNA_UBICACION].astype(str).str.strip() == ubicacion] \
+        if COLUMNA_UBICACION in df.columns else pd.DataFrame()
 
-    concepto_val = pos_data["Concepto"].values[0] if not pos_data.empty and "Concepto" in pos_data.columns else ""
-    periodos_val = pos_data["Periodos"].values[0] if not pos_data.empty and "Periodos" in pos_data.columns else ""
-    anio_val = str(pos_data["Año"].values[0]) if not pos_data.empty and "Año" in pos_data.columns else ""
-    detalle_val = pos_data["Detalle"].values[0] if not pos_data.empty and "Detalle" in pos_data.columns else ""
-    obs_val = pos_data["Observaciones"].values[0] if not pos_data.empty and "Observaciones" in pos_data.columns else ""
-    fotos_existentes = pos_data["Foto"].values[0] if not pos_data.empty and "Foto" in pos_data.columns else ""
-    lista_fotos_existentes = parsear_fotos(fotos_existentes)
+    def _val(col):
+        if pos_data.empty or col not in pos_data.columns:
+            return ""
+        v = pos_data[col].values[0]
+        return "" if pd.isna(v) else str(v)
+
+    concepto_val = _val("Concepto")
+    periodos_val = _val("Periodos")
+    anio_val = _val("Año")
+    detalle_val = _val("Detalle")
+    obs_val = _val("Observaciones")
+    lista_fotos_existentes = parsear_fotos(_val("Foto"))
 
     # --- Fotos ya registradas ---
     fotos_a_conservar = []
@@ -260,7 +367,7 @@ def abrir_modal_registro(ubicacion):
             f"{MAX_FOTOS_POR_POSICION}. Quita algunas antes de guardar."
         )
 
-    with st.form("form_modal"):
+    with st.form(f"form_modal_{ubicacion}"):
         concepto = st.text_input("Concepto / Título", value=concepto_val)
 
         col_m1, col_m2 = st.columns(2)
@@ -287,24 +394,66 @@ def abrir_modal_registro(ubicacion):
                     links_nuevos = subir_multiples_fotos(archivos_nuevos, ubicacion)
 
             fotos_finales = fotos_a_conservar + links_nuevos
-            url_fotos = ", ".join(fotos_finales)
+            descartadas = [u for u in lista_fotos_existentes if u not in fotos_a_conservar]
 
-            nueva_fila = [ubicacion, concepto, periodos, detalle, anio, obs, url_fotos]
+            nueva_fila = construir_fila({
+                COLUMNA_UBICACION: ubicacion,
+                "Concepto": concepto,
+                "Periodos": periodos,
+                "Detalle": detalle,
+                "Año": anio,
+                "Observaciones": obs,
+                "Foto": ", ".join(fotos_finales),
+            })
 
             try:
-                cell = worksheet.find(ubicacion)
-                if cell:
-                    worksheet.update([nueva_fila], f"A{cell.row}:G{cell.row}")
+                fila = fila_de(ubicacion, df)
+                ultima_col = chr(ord('A') + len(ENCABEZADOS) - 1)
+                if fila:
+                    worksheet.update([nueva_fila], f"A{fila}:{ultima_col}{fila}")
                 else:
                     worksheet.append_row(nueva_fila)
 
+                if descartadas:
+                    eliminar_fotos_de_drive(descartadas)
+
                 # Limpieza de la canasta de cámara para esta ubicación
                 st.session_state[f"canasta_{ubicacion}"] = []
+                cargar_datos.clear()
 
                 st.toast(f"¡Posición {ubicacion} guardada con éxito!", icon="✅")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error al guardar: {e}")
+
+    # --- Vaciar / liberar la posición ---
+    if not pos_data.empty:
+        with st.expander("🧹 Vaciar esta posición"):
+            st.caption("Elimina la fila de la hoja y envía sus fotos a la papelera de Drive.")
+            confirmar = st.checkbox(
+                f"Confirmo liberar {ubicacion}",
+                key=f"conf_vaciar_{ubicacion}"
+            )
+            if st.button(
+                "Liberar posición",
+                key=f"vaciar_{ubicacion}",
+                disabled=not confirmar,
+                use_container_width=True
+            ):
+                try:
+                    fila = fila_de(ubicacion, df)
+                    if fila:
+                        worksheet.delete_rows(fila)
+                    if lista_fotos_existentes:
+                        eliminar_fotos_de_drive(lista_fotos_existentes)
+
+                    st.session_state[f"canasta_{ubicacion}"] = []
+                    cargar_datos.clear()
+
+                    st.toast(f"Posición {ubicacion} liberada", icon="🧹")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al liberar la posición: {e}")
 
 
 # ---------------------------------------------------------
