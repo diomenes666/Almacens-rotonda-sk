@@ -37,7 +37,7 @@ COLUMNA_UBICACION = "Ultima Ubicación"
 PRIMERA_FILA_DATOS = 2  # fila 1 = encabezados
 
 # Campos que el formulario exige completar antes de guardar.
-CAMPOS_REQUERIDOS = ["Área"]
+CAMPOS_REQUERIDOS = ["Area"]
 
 
 # ---------------------------------------------------------
@@ -316,7 +316,7 @@ def abrir_modal_registro(ubicacion):
         return "" if pd.isna(v) else str(v)
 
     concepto_val = _val("Concepto")
-    area_val = _val("Área")
+    area_val = _val("Area")
     periodos_val = _val("Periodos")
     anio_val = _val("Año")
     detalle_val = _val("Detalle")
@@ -433,7 +433,7 @@ def abrir_modal_registro(ubicacion):
             nueva_fila = construir_fila({
                 COLUMNA_UBICACION: ubicacion,
                 "Concepto": concepto,
-                "Área": area,
+                "Area": area,
                 "Periodos": periodos,
                 "Detalle": detalle,
                 "Año": anio,
