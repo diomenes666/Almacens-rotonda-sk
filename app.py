@@ -21,22 +21,13 @@ st.title("📦 Almacén Rotonda")
 # ---------------------------------------------------------
 # CONFIGURACIÓN
 # ---------------------------------------------------------
-# ID de la Unidad Compartida (Shared Drive) de Google Drive.
-# Al ser una Unidad Compartida, el almacenamiento pertenece a la
-# organización, no a la Service Account, por lo que no hay problemas
-# de cuota 0 bytes ni de transferencia de propiedad.
 DRIVE_FOLDER_ID = "0AH09sQFmvTNvUk9PVA"
-
-# Dominio de tu organización, usado como respaldo si Google Workspace
-# bloquea compartir archivos "para cualquier persona con el enlace".
 DOMINIO_ORG = "sankare.com"
-
 MAX_FOTOS_POR_POSICION = 5
 
 COLUMNA_UBICACION = "Ultima Ubicación"
-PRIMERA_FILA_DATOS = 2  # fila 1 = encabezados
+PRIMERA_FILA_DATOS = 2
 
-# Campos que el formulario exige completar antes de guardar.
 CAMPOS_REQUERIDOS = ["Area"]
 
 
@@ -45,9 +36,6 @@ CAMPOS_REQUERIDOS = ["Area"]
 # ---------------------------------------------------------
 @st.cache_resource
 def conectar_servicios():
-    """Cliente de Sheets y Drive. Se cachea como recurso: crearlo en cada
-    rerun (que ocurre en cada clic de la grilla) era la principal fuente
-    de lentitud y de errores 429."""
     try:
         creds_dict = dict(st.secrets["connections"]["gsheets"])
 
@@ -74,17 +62,10 @@ worksheet, drive_service = conectar_servicios()
 
 @st.cache_data(ttl=300, show_spinner=False)
 def obtener_encabezados():
-    """Lee la fila de encabezados directamente de la hoja. Así, si en el
-    Excel se agrega, quita o reordena una columna (como 'Área'), la app
-    se adapta sola: no hay que tocar ninguna constante en el código."""
     return [h.strip() for h in worksheet.row_values(1) if h.strip()]
 
 
 ENCABEZADOS = obtener_encabezados()
-
-# Columnas que determinan si una posición está realmente OCUPADA:
-# cualquier columna que no sea la ubicación misma. Si todas están vacías,
-# la posición se considera libre aunque la fila siga existiendo.
 COLUMNAS_CONTENIDO = [h for h in ENCABEZADOS if h != COLUMNA_UBICACION]
 
 _faltantes = [c for c in [COLUMNA_UBICACION] + CAMPOS_REQUERIDOS if c not in ENCABEZADOS]
@@ -107,8 +88,6 @@ def _extension_archivo(archivo, default="jpg"):
 
 
 def _id_desde_link(url):
-    """Extrae el fileId de un webViewLink de Drive.
-    Soporta .../file/d/<id>/view y ...?id=<id>."""
     if not url:
         return None
     m = re.search(r"/d/([A-Za-z0-9_-]{10,})", url)
@@ -119,10 +98,6 @@ def _id_desde_link(url):
 
 
 def _otorgar_permiso_visualizacion(file_id):
-    """Intenta hacer el archivo visible por enlace público.
-    Si la política de la organización bloquea compartir fuera del
-    dominio, cae de forma automática a un permiso restringido al
-    dominio de la empresa."""
     try:
         drive_service.permissions().create(
             fileId=file_id,
@@ -144,12 +119,11 @@ def _otorgar_permiso_visualizacion(file_id):
         except Exception as e:
             st.warning(
                 f"El archivo se subió, pero no se pudo generar un enlace "
-                f"para verlo (revisa las políticas de tu organización): {e}"
+                f"para verlo: {e}"
             )
 
 
 def subir_archivo_a_drive(archivo, nombre_archivo):
-    """Sube un único archivo a la Unidad Compartida y devuelve su link."""
     try:
         metadata = {
             'name': nombre_archivo,
@@ -176,7 +150,6 @@ def subir_archivo_a_drive(archivo, nombre_archivo):
 
 
 def subir_multiples_fotos(archivos, ubicacion):
-    """Sube una lista de archivos y devuelve la lista de links exitosos."""
     links = []
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     for idx, archivo in enumerate(archivos, start=1):
@@ -189,8 +162,6 @@ def subir_multiples_fotos(archivos, ubicacion):
 
 
 def eliminar_fotos_de_drive(urls):
-    """Envía a la papelera los archivos cuyos links ya no están asociados
-    a ninguna posición, para no dejar huérfanos en la Unidad Compartida."""
     for url in urls:
         file_id = _id_desde_link(url)
         if not file_id:
@@ -210,24 +181,16 @@ def eliminar_fotos_de_drive(urls):
 # ---------------------------------------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def cargar_datos():
-    """Lectura cacheada de la hoja. Se invalida explícitamente con
-    cargar_datos.clear() después de cada escritura."""
     return pd.DataFrame(worksheet.get_all_records())
 
 
 def parsear_fotos(valor_celda):
-    """Convierte el contenido de la celda 'Foto' (links separados por
-    coma) en una lista limpia de URLs."""
     if not valor_celda:
         return []
     return [url.strip() for url in str(valor_celda).split(",") if url.strip()]
 
 
 def calcular_estado_posiciones(df):
-    """Devuelve {ubicación: concepto} solo para posiciones con contenido.
-    Una posición está ocupada si TIENE CONTENIDO, no por el simple hecho
-    de existir la fila (antes una posición vaciada seguía en rojo).
-    El concepto/título se usa además para mostrarlo en la grilla."""
     if df.empty or COLUMNA_UBICACION not in df.columns:
         return {}
     cols = [c for c in COLUMNAS_CONTENIDO if c in df.columns]
@@ -248,18 +211,7 @@ def calcular_estado_posiciones(df):
     return estado
 
 
-def truncar(texto, largo=16):
-    texto = (texto or "").strip()
-    if len(texto) <= largo:
-        return texto
-    return texto[: largo - 1].rstrip() + "…"
-
-
 def fila_de(ubicacion, df):
-    """Número de fila real en la hoja para una ubicación.
-    Reemplaza a worksheet.find(), que recorre TODAS las columnas y podía
-    devolver una fila equivocada si el código aparecía en Detalle u
-    Observaciones de otro registro."""
     if df.empty or COLUMNA_UBICACION not in df.columns:
         return None
     coincidencias = df.index[
@@ -269,7 +221,6 @@ def fila_de(ubicacion, df):
 
 
 def construir_fila(valores):
-    """Arma la fila respetando el orden declarado en ENCABEZADOS."""
     return [valores.get(h, "") for h in ENCABEZADOS]
 
 
@@ -296,7 +247,7 @@ elif busqueda:
 # Configuración de estantes
 config_estantes = {"A": {1: 2, 2: 3, 3: 2}, "B": {1: 2, 2: 2, 3: 3}, "C": {1: 2, 2: 2, 3: 2}}
 posiciones_bloqueadas = []
-estado_posiciones = calcular_estado_posiciones(df)  # {ubicación: concepto}
+estado_posiciones = calcular_estado_posiciones(df)
 
 
 # ---------------------------------------------------------
@@ -323,10 +274,6 @@ def abrir_modal_registro(ubicacion):
     obs_val = _val("Observaciones")
     lista_fotos_existentes = parsear_fotos(_val("Foto"))
 
-    # ---------------------------------------------------------------
-    # 1) INFORMACIÓN DE LA POSICIÓN — primero, para identificar el
-    #    contenido de un vistazo antes de llegar a las fotos.
-    # ---------------------------------------------------------------
     concepto = st.text_input("Concepto / Título", value=concepto_val)
 
     col_i1, col_i2 = st.columns(2)
@@ -342,9 +289,6 @@ def abrir_modal_registro(ubicacion):
     st.caption("* Campo obligatorio")
     st.divider()
 
-    # ---------------------------------------------------------------
-    # 2) FOTOS — al final, es lo último que se revisa antes de guardar.
-    # ---------------------------------------------------------------
     st.markdown("**📸 Fotografías**")
 
     fotos_a_conservar = []
@@ -365,7 +309,6 @@ def abrir_modal_registro(ubicacion):
 
     st.caption(f"Agregar evidencia (opcional) — máximo {MAX_FOTOS_POR_POSICION} fotos en total por posición.")
 
-    # --- Subida desde galería (múltiple) ---
     fotos_galeria = st.file_uploader(
         "Subir imágenes desde Galería/PC",
         type=["jpg", "jpeg", "png"],
@@ -373,7 +316,6 @@ def abrir_modal_registro(ubicacion):
         key=f"file_{ubicacion}"
     )
 
-    # --- Captura desde cámara, una por una, acumuladas en una "canasta" ---
     st.session_state.setdefault(f"canasta_{ubicacion}", [])
     st.session_state.setdefault(f"cam_counter_{ubicacion}", 0)
 
@@ -452,7 +394,6 @@ def abrir_modal_registro(ubicacion):
                 if descartadas:
                     eliminar_fotos_de_drive(descartadas)
 
-                # Limpieza de la canasta de cámara para esta ubicación
                 st.session_state[f"canasta_{ubicacion}"] = []
                 cargar_datos.clear()
 
@@ -461,7 +402,6 @@ def abrir_modal_registro(ubicacion):
             except Exception as e:
                 st.error(f"Error al guardar: {e}")
 
-    # --- Vaciar / liberar la posición ---
     if not pos_data.empty:
         with st.expander("🧹 Vaciar esta posición"):
             st.caption("Elimina la fila de la hoja y envía sus fotos a la papelera de Drive.")
@@ -516,15 +456,32 @@ for sub_idx, sub_num in enumerate([1, 2, 3]):
                         else:
                             concepto = estado_posiciones.get(cod)
                             ocup = concepto is not None
-                            lbl = f"🔴 {cod}" if ocup else f"🟢 {cod}"
+
+                            # LÓGICA INVERTIDA DE VISUALIZACIÓN:
+                            # 1) Ocupado: Muestra el Concepto completo en el botón y la ubicación en el caption.
+                            # 2) Libre: Muestra la ubicación dentro del botón.
+                            if ocup:
+                                texto_boton = f"🔴 {concepto if concepto else cod}"
+                            else:
+                                texto_boton = f"🟢 {cod}"
 
                             if st.button(
-                                lbl,
+                                texto_boton,
                                 key=f"btn_{cod}",
                                 use_container_width=True,
-                                help=concepto if concepto else None,
+                                help=f"{cod} - {concepto}" if concepto else cod,
                             ):
                                 abrir_modal_registro(cod)
 
-                            if concepto:
-                                st.caption(truncar(concepto))
+                            # Ubicación técnica debajo únicamente cuando está ocupado
+                            if ocup:
+                                st.caption(f"📍 {cod}")
+
+# Botón auxiliar para descargar el archivo completo desde la interfaz si se desea
+st.sidebar.markdown("---")
+st.sidebar.download_button(
+    label="📥 Descargar app.py",
+    data=open(__file__, "rb") if "__file__" in locals() else "",
+    file_name="app.py",
+    mime="text/x-python"
+)
